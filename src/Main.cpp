@@ -108,14 +108,44 @@ float parseFirstOscValue(const juce::OSCMessage& message, bool& ok)
     return 0.0f;
 }
 
+juce::String normalizeNumericToken(const juce::String& token)
+{
+    auto t = token.trim();
+    if (t.containsChar(',') && !t.containsChar('.'))
+        t = t.replace(",", ".");
+    return t;
+}
+
 bool parseNumericToken(const juce::String& token, float& valueOut)
 {
-    const auto t = token.trim();
+    const auto t = normalizeNumericToken(token);
     if (!(t.containsAnyOf("0123456789") && t.containsOnly("0123456789+-.eE")))
         return false;
 
     valueOut = t.getFloatValue();
     return true;
+}
+
+bool splitLineTokens(const juce::String& line, int expectedCols, juce::StringArray& out)
+{
+    out.clear();
+
+    // Prefer semicolon+whitespace split first (allows decimal commas).
+    juce::StringArray semiCols;
+    semiCols.addTokens(line, "; \t", "");
+    semiCols.trim();
+    semiCols.removeEmptyStrings();
+    if (semiCols.size() == expectedCols)
+    {
+        out = semiCols;
+        return true;
+    }
+
+    // Fallback: comma/semicolon/whitespace split.
+    out.addTokens(line, ",; \t", "");
+    out.trim();
+    out.removeEmptyStrings();
+    return out.size() == expectedCols;
 }
 
 bool parseLutText(const juce::String& text, ParsedLutData& dataOut, juce::String& error)
@@ -138,10 +168,7 @@ bool parseLutText(const juce::String& text, ParsedLutData& dataOut, juce::String
 
             ++nonEmptyLines;
             juce::StringArray cols;
-            cols.addTokens(trimmed, ",; \t", "");
-            cols.trim();
-            cols.removeEmptyStrings();
-            if (cols.size() != 2)
+            if (!splitLineTokens(trimmed, 2, cols))
             {
                 allLinesArePairs = false;
                 break;
@@ -163,9 +190,7 @@ bool parseLutText(const juce::String& text, ParsedLutData& dataOut, juce::String
                     continue;
 
                 juce::StringArray cols;
-                cols.addTokens(trimmed, ",; \t", "");
-                cols.trim();
-                cols.removeEmptyStrings();
+                splitLineTokens(trimmed, 2, cols);
 
                 float inValue = 0.0f;
                 float outValue = 0.0f;
@@ -184,9 +209,38 @@ bool parseLutText(const juce::String& text, ParsedLutData& dataOut, juce::String
         }
     }
 
+    // Detect 3-column surface files accidentally loaded as 1D LUTs.
+    {
+        bool allLinesAreTriples = true;
+        int nonEmptyLines = 0;
+        for (const auto& line : lines)
+        {
+            const auto trimmed = line.trim();
+            if (trimmed.isEmpty())
+                continue;
+
+            ++nonEmptyLines;
+            juce::StringArray cols;
+            if (!splitLineTokens(trimmed, 3, cols))
+            {
+                allLinesAreTriples = false;
+                break;
+            }
+        }
+
+        if (allLinesAreTriples && nonEmptyLines >= kMinLutEntryCount)
+        {
+            error = "This file looks like a 2D surface (lens,focus,fov). Use Load Surface instead of Load LUT.";
+            return false;
+        }
+    }
+
     // Fallback mode: output-only values (input axis comes from Input Min/Max).
     juce::StringArray tokens;
-    tokens.addTokens(text, ",; \t\r\n", "");
+    const bool preferSemicolon = text.containsChar(';') && !text.containsChar('.');
+    const auto normalizedText = preferSemicolon ? text.replace(",", ".") : text;
+    const auto separators = preferSemicolon ? "; \t\r\n" : ",; \t\r\n";
+    tokens.addTokens(normalizedText, separators, "");
     tokens.trim();
     tokens.removeEmptyStrings();
 
@@ -240,10 +294,7 @@ bool parseSurfaceText(const juce::String& text, ParsedSurfaceData& dataOut, juce
             continue;
 
         juce::StringArray cols;
-        cols.addTokens(trimmed, ",; \t", "");
-        cols.trim();
-        cols.removeEmptyStrings();
-        if (cols.size() != 3)
+        if (!splitLineTokens(trimmed, 3, cols))
         {
             error = "Surface format: expected lens,focus,fov at line " + juce::String(lineNo);
             return false;
@@ -434,6 +485,32 @@ public:
     std::function<void(size_t, size_t)> onSurfacePointClicked;
     std::function<void(float)> onZoomChanged;
 
+    void setLutEditEnabled(bool enabled)
+    {
+        lutEditEnabled = enabled;
+        if (!lutEditEnabled)
+        {
+            draggedPointIndex = -1;
+            mouseDownPointIndex = -1;
+            dragSessionActive = false;
+        }
+    }
+
+    void setSurfaceEditEnabled(bool enabled, int baseFocusIndex)
+    {
+        surfaceEditEnabled = enabled;
+        baseSurfaceFocusIndex = baseFocusIndex;
+        if (!surfaceEditEnabled)
+        {
+            draggedSurfaceLensIndex = -1;
+            draggedSurfaceFocusIndex = -1;
+            surfaceDragSessionActive = false;
+            mouseDownSurfaceLensIndex = -1;
+            mouseDownSurfaceFocusIndex = -1;
+        }
+        repaint();
+    }
+
     void setInputRange(float minValue, float maxValue)
     {
         xMin = minValue;
@@ -585,7 +662,7 @@ public:
 
         constexpr float kPickRadiusPx = 14.0f;
 
-        if (hasCompleteSurfaceData())
+        if (hasCompleteSurfaceData() && (surfaceEditEnabled || baseSurfaceFocusIndex >= 0))
         {
             auto bestDistSq = kPickRadiusPx * kPickRadiusPx;
             const auto lensCount = static_cast<int>(surfaceLensAxis.size());
@@ -594,6 +671,8 @@ public:
             {
                 for (int j = 0; j < focusCount; ++j)
                 {
+                    if (!surfaceEditEnabled && j != baseSurfaceFocusIndex)
+                        continue;
                     const auto x = juce::jmap(surfaceLensAxis[static_cast<size_t>(i)], minX, maxX, plot.getX(), plot.getRight());
                     const auto y = juce::jmap(surfaceValuesGrid[static_cast<size_t>(i * focusCount + j)], maxY, minY, plot.getY(), plot.getBottom());
                     const auto distSq = event.position.getDistanceSquaredFrom({ x, y });
@@ -614,20 +693,23 @@ public:
             }
         }
 
-        const bool hasExplicitX = (!lutInputValues.empty() && lutInputValues.size() == lutOutputValues.size());
-        auto bestDistSq = kPickRadiusPx * kPickRadiusPx;
-        for (int i = 0; i < static_cast<int>(lutOutputValues.size()); ++i)
+        if (lutEditEnabled)
         {
-            const auto t = lutOutputValues.size() == 1 ? 0.0f : static_cast<float>(i) / static_cast<float>(lutOutputValues.size() - 1);
-            const auto xValue = hasExplicitX ? lutInputValues[static_cast<size_t>(i)] : (minX + t * (maxX - minX));
-            const auto yValue = lutOutputValues[static_cast<size_t>(i)];
-            const auto x = juce::jmap(xValue, minX, maxX, plot.getX(), plot.getRight());
-            const auto y = juce::jmap(yValue, maxY, minY, plot.getY(), plot.getBottom());
-            const auto distSq = event.position.getDistanceSquaredFrom({ x, y });
-            if (distSq <= bestDistSq)
+            const bool hasExplicitX = (!lutInputValues.empty() && lutInputValues.size() == lutOutputValues.size());
+            auto bestDistSq = kPickRadiusPx * kPickRadiusPx;
+            for (int i = 0; i < static_cast<int>(lutOutputValues.size()); ++i)
             {
-                bestDistSq = distSq;
-                draggedPointIndex = i;
+                const auto t = lutOutputValues.size() == 1 ? 0.0f : static_cast<float>(i) / static_cast<float>(lutOutputValues.size() - 1);
+                const auto xValue = hasExplicitX ? lutInputValues[static_cast<size_t>(i)] : (minX + t * (maxX - minX));
+                const auto yValue = lutOutputValues[static_cast<size_t>(i)];
+                const auto x = juce::jmap(xValue, minX, maxX, plot.getX(), plot.getRight());
+                const auto y = juce::jmap(yValue, maxY, minY, plot.getY(), plot.getBottom());
+                const auto distSq = event.position.getDistanceSquaredFrom({ x, y });
+                if (distSq <= bestDistSq)
+                {
+                    bestDistSq = distSq;
+                    draggedPointIndex = i;
+                }
             }
         }
 
@@ -651,7 +733,9 @@ public:
 
     void mouseDrag(const juce::MouseEvent& event) override
     {
-        if (draggedSurfaceLensIndex >= 0 && draggedSurfaceFocusIndex >= 0)
+        if ((surfaceEditEnabled || draggedSurfaceFocusIndex == baseSurfaceFocusIndex)
+            && draggedSurfaceLensIndex >= 0
+            && draggedSurfaceFocusIndex >= 0)
         {
             if (!event.mods.isShiftDown())
                 return;
@@ -696,7 +780,7 @@ public:
             return;
         }
 
-        if (draggedPointIndex >= 0 && draggedPointIndex < static_cast<int>(lutOutputValues.size()))
+        if (lutEditEnabled && draggedPointIndex >= 0 && draggedPointIndex < static_cast<int>(lutOutputValues.size()))
         {
             if (!event.mods.isShiftDown())
                 return;
@@ -807,7 +891,8 @@ public:
         if (hadSurfaceDragSession && onSurfaceDragEnded)
             onSurfaceDragEnded();
 
-        if (hadSurfacePoint
+        if ((surfaceEditEnabled || releasedSurfaceFocusIndex == baseSurfaceFocusIndex)
+            && hadSurfacePoint
             && !dragMovedSinceMouseDown
             && releasedSurfaceLensIndex == mouseDownSurfaceLensIndex
             && releasedSurfaceFocusIndex == mouseDownSurfaceFocusIndex
@@ -829,7 +914,11 @@ public:
         if (hadDragSession && onLutDragEnded)
             onLutDragEnded();
 
-        if (hadPoint && !dragMovedSinceMouseDown && releasedPointIndex == mouseDownPointIndex && onLutPointClicked)
+        if (lutEditEnabled
+            && hadPoint
+            && !dragMovedSinceMouseDown
+            && releasedPointIndex == mouseDownPointIndex
+            && onLutPointClicked)
             onLutPointClicked(static_cast<size_t>(releasedPointIndex));
 
         mouseDownPointIndex = -1;
@@ -1145,6 +1234,9 @@ private:
     bool dragMovedSinceMouseDown = false;
     bool dragSessionActive = false;
     bool surfaceDragSessionActive = false;
+    bool surfaceEditEnabled = false;
+    int baseSurfaceFocusIndex = -1;
+    bool lutEditEnabled = true;
     float zoomFactor = 1.0f;
     bool panSessionActive = false;
     bool viewCenterInitialized = false;
@@ -1244,6 +1336,11 @@ public:
         addAndMakeVisible(loadLutButton);
         addAndMakeVisible(saveLutButton);
         addAndMakeVisible(loadSurfaceButton);
+        surfaceEditToggle.setButtonText("Edit FOV Deviation");
+        surfaceEditToggle.setToggleState(false, juce::dontSendNotification);
+        addAndMakeVisible(surfaceEditToggle);
+        surfaceEditEnabled = surfaceEditToggle.getToggleState();
+        updateEditGates();
         addAndMakeVisible(newLutButton);
         addAndMakeVisible(addPointAtInputButton);
         addAndMakeVisible(undoLutButton);
@@ -1376,6 +1473,11 @@ public:
         loadLutButton.onClick = [this] { loadLutFromFile(); };
         saveLutButton.onClick = [this] { saveLutToFile(); };
         loadSurfaceButton.onClick = [this] { loadSurfaceFromFile(); };
+        surfaceEditToggle.onClick = [this]
+        {
+            surfaceEditEnabled = surfaceEditToggle.getToggleState();
+            updateEditGates();
+        };
         newLutButton.onClick = [this] { startNewLutCreation(); };
         addPointAtInputButton.onClick = [this] { addLutPointAtCurrentInput(); };
         undoLutButton.onClick = [this] { undoLutChange(); };
@@ -1420,6 +1522,7 @@ public:
         const int pointButtonW = 62;
         const int undoRedoButtonW = 110;
         const int presetButtonW = 130;
+        const int surfaceToggleW = 170;
         const int presetEditorW = 140;
         const int gap = 8;
 
@@ -1483,6 +1586,8 @@ public:
         saveLutButton.setBounds(row3.removeFromLeft(lutButtonW));
         row3.removeFromLeft(gap);
         loadSurfaceButton.setBounds(row3.removeFromLeft(lutButtonW));
+        row3.removeFromLeft(gap);
+        surfaceEditToggle.setBounds(row3.removeFromLeft(surfaceToggleW));
 
         area.removeFromTop(6);
         auto row3b = area.removeFromTop(rowH);
@@ -2089,11 +2194,21 @@ private:
 
     void refreshPointEditorFromSelection()
     {
+        const int editableBaseFocusIndex = getEditableSurfaceFocusIndex();
+        if (!surfaceEditEnabled
+            && selectedSurfaceFocusIndex >= 0
+            && selectedSurfaceFocusIndex != editableBaseFocusIndex)
+        {
+            selectedSurfaceLensIndex = -1;
+            selectedSurfaceFocusIndex = -1;
+        }
+
         const bool hasSurfaceSelection =
             selectedSurfaceLensIndex >= 0
             && selectedSurfaceFocusIndex >= 0
             && selectedSurfaceLensIndex < static_cast<int>(surfaceLensAxis.size())
             && selectedSurfaceFocusIndex < static_cast<int>(surfaceFocusAxis.size())
+            && (surfaceEditEnabled || selectedSurfaceFocusIndex == editableBaseFocusIndex)
             && surfaceValuesGrid.size() == surfaceLensAxis.size() * surfaceFocusAxis.size();
 
         if (hasSurfaceSelection)
@@ -2128,6 +2243,46 @@ private:
         suppressPointEditorCallbacks = false;
     }
 
+    void clearSurfaceSelection()
+    {
+        selectedSurfaceLensIndex = -1;
+        selectedSurfaceFocusIndex = -1;
+        lutCartesianPlot.setSelectedSurfacePoint(-1, -1);
+        refreshPointEditorFromSelection();
+    }
+
+    void clearLutSelection()
+    {
+        selectedLutPointIndex = -1;
+        lutCartesianPlot.setSelectedPointIndex(-1);
+        refreshPointEditorFromSelection();
+    }
+
+    void updateEditGates()
+    {
+        const int baseFocusIndex = getEditableSurfaceFocusIndex();
+        lutCartesianPlot.setSurfaceEditEnabled(surfaceEditEnabled, baseFocusIndex);
+        const bool allowLutEditing = !surfaceCalibrationActive() || surfaceEditEnabled;
+        lutCartesianPlot.setLutEditEnabled(allowLutEditing);
+        if (!surfaceEditEnabled)
+            clearSurfaceSelection();
+        if (!allowLutEditing)
+            clearLutSelection();
+    }
+
+    int getEditableSurfaceFocusIndex() const
+    {
+        if (!surfaceCalibrationActive())
+            return -1;
+        return static_cast<int>(getBaseFocusIndex());
+    }
+
+    bool isSurfacePointEditable(size_t focusIndex) const
+    {
+        const auto baseIndex = getEditableSurfaceFocusIndex();
+        return surfaceEditEnabled || (baseIndex >= 0 && static_cast<int>(focusIndex) == baseIndex);
+    }
+
     void selectLutPointForEditing(size_t index)
     {
         if (index >= lutOutputValues.size())
@@ -2143,6 +2298,8 @@ private:
 
     void selectSurfacePointForEditing(size_t lensIndex, size_t focusIndex)
     {
+        if (!isSurfacePointEditable(focusIndex))
+            return;
         if (lensIndex >= surfaceLensAxis.size() || focusIndex >= surfaceFocusAxis.size())
             return;
 
@@ -2178,6 +2335,9 @@ private:
 
     bool applySelectedSurfacePointValue(float value)
     {
+        if (selectedSurfaceFocusIndex < 0
+            || !isSurfacePointEditable(static_cast<size_t>(selectedSurfaceFocusIndex)))
+            return false;
         if (selectedSurfaceLensIndex < 0 || selectedSurfaceFocusIndex < 0)
             return false;
 
@@ -2202,7 +2362,9 @@ private:
 
     bool applySelectedPointValue(float value)
     {
-        if (selectedSurfaceLensIndex >= 0 && selectedSurfaceFocusIndex >= 0)
+        if (selectedSurfaceLensIndex >= 0
+            && selectedSurfaceFocusIndex >= 0
+            && isSurfacePointEditable(static_cast<size_t>(selectedSurfaceFocusIndex)))
             return applySelectedSurfacePointValue(value);
 
         return applySelectedLutPointValue(value);
@@ -2227,6 +2389,7 @@ private:
             && selectedSurfaceFocusIndex >= 0
             && selectedSurfaceLensIndex < static_cast<int>(surfaceLensAxis.size())
             && selectedSurfaceFocusIndex < static_cast<int>(surfaceFocusAxis.size())
+            && isSurfacePointEditable(static_cast<size_t>(selectedSurfaceFocusIndex))
             && surfaceValuesGrid.size() == surfaceLensAxis.size() * surfaceFocusAxis.size();
         const bool hasLutSelection =
             selectedLutPointIndex >= 0
@@ -2706,6 +2869,8 @@ private:
 
     void handleSurfacePointDragged(size_t lensIndex, size_t focusIndex, float outputValue)
     {
+        if (!isSurfacePointEditable(focusIndex))
+            return;
         if (lensIndex >= surfaceLensAxis.size() || focusIndex >= surfaceFocusAxis.size())
             return;
 
@@ -2967,7 +3132,7 @@ private:
             return;
         }
 #endif
-
+        updateEditGates();
         lutCartesianPlot.setSurfaceValues(surfaceLensAxis, surfaceFocusAxis, surfaceValuesGrid);
         selectedLutPointIndex = -1;
         selectedSurfaceLensIndex = -1;
@@ -3379,6 +3544,7 @@ private:
     juce::TextButton loadLutButton;
     juce::TextButton saveLutButton;
     juce::TextButton loadSurfaceButton;
+    juce::ToggleButton surfaceEditToggle;
     juce::TextButton newLutButton;
     juce::TextButton addPointAtInputButton;
     juce::TextButton undoLutButton;
@@ -3436,6 +3602,7 @@ private:
     std::vector<float> pendingNewLutOutputValues;
     std::vector<float> pendingNewSurfaceFocusValues;
     bool pendingNewCreatesSurface = false;
+    bool surfaceEditEnabled = false;
     std::vector<float> surfaceLensAxis;
     std::vector<float> surfaceFocusAxis;
     std::vector<float> surfaceValuesGrid;
