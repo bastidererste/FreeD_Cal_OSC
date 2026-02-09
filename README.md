@@ -1,41 +1,23 @@
-# LinInterpol OSC Starter
+# FreeD Cal OSC
 
-Minimal C++ GUI starter app for:
+GUI tools for calibrating FreeD lens data and sending corrected values over OSC.
 
-`OSC in -> interpolation -> OSC out`
+This repo includes two desktop apps:
 
-Built with JUCE + CMake so you can extend it for math-heavy interpolation logic.
-
-This repo now includes 2 desktop apps:
-
-- `LinInterpol OSC Starter`: input -> LUT/interpolation -> output
-- `Lens Encoder OSC Sim`: broadcast-style focal/encoder OSC generator
+- `LinInterpol OSC Starter`: FreeD in -> calibrate FOV + focus deviation -> OSC out
+- `Lens Encoder OSC Sim`: FreeD-style lens simulator for testing
 
 ## Features
 
-- GUI fields for:
-  - input port + input OSC address
-  - output host + output port + output OSC address
-  - calibration input range (`Input Min`, `Input Max`)
-  - LUT loader (`Load LUT`)
-  - smoothing time (ms)
-  - output rate (Hz)
-- Accepts first OSC argument as float/int/string-number
-- Optional LUT calibration before smoothing/output:
-  - incoming raw OSC value is normalized from `Input Min..Input Max` to `0..1`
-  - normalized position is interpolated across the LUT
-  - with ALGLIB Free Edition configured: cubic spline interpolation
-  - without ALGLIB: linear interpolation fallback
-- Interpolation stage uses an exponential one-pole smoother:
-  - `y = y + alpha * (target - y)`
-  - `alpha = 1 - exp(-dt / tau)`
-- Live plot shows incoming raw value and outgoing interpolated value over time
-- Cartesian LUT plot shows:
-  - current input point
-  - LUT target point at that exact input
-  - ALGLIB cubic interpolation curve (for comparison)
-  - static LUT curve (no scrolling/autoscale)
-- Sends interpolated values continuously to output OSC endpoint
+- FreeD input with configurable OSC address/port
+- Calibrate FOV and focus deviation from LUTs
+- OSC output with configurable host/port/address
+- ALGLIB Free Edition:
+  - cubic spline interpolation (1D)
+  - bicubic interpolation (2D)
+  - linear fallback when ALGLIB is not configured
+- Optional smoothing and fixed output rate
+- Live plots for incoming vs calibrated output
 
 ## Build
 
@@ -68,6 +50,17 @@ cmake -S . -B build \
 cmake --build build -j
 ```
 
+Windows (Visual Studio 2022):
+
+- Install CMake (or enable **CMake tools for Windows** in Visual Studio Installer) and reopen your terminal so `cmake` is on PATH.
+- Use a **x64 Native Tools Command Prompt for VS 2022** (recommended) or PowerShell.
+
+```powershell
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+  -DALGLIB_SOURCE_DIR="C:\path\to\alglib-cpp"
+cmake --build build --config Release
+```
+
 ## Run
 
 macOS app bundles (default locations):
@@ -81,21 +74,7 @@ If you generate Xcode projects, app bundles may be inside a config folder (`Debu
 
 ## Lens Encoder OSC Sim
 
-The second app simulates a broadcast lens zoom encoder with:
-
-- direct zoom position input (`0..1`)
-- non-linear encoder mapping (`gamma`)
-- backlash and noise in encoder counts
-
-Default OSC output:
-
-- host: `127.0.0.1`
-- port: `9100`
-- address: `/lens/encoder`
-- args:
-  - `int`: encoder count (first arg, useful for your existing parser)
-  - `float`: focal length mm
-  - `float`: zoom position `0..1`
+Simulator for testing FreeD calibration without hardware.
 
 ## LUT Format
 
@@ -134,3 +113,4 @@ Example file in this repo:
 - Replace the one-pole smoother with your interpolation model in `timerCallback()` in `src/Main.cpp`
 - Add per-message timestamps / sequence IDs for advanced interpolation/extrapolation
 - Add multi-channel input (bundle/messages with multiple args)
+
