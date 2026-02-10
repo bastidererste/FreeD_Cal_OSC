@@ -38,11 +38,18 @@ jobs:
             libfontconfig1-dev \
             libcurl4-openssl-dev \
             libwebkit2gtk-4.0-dev \
-            libgtk-3-dev
+            libgtk-3-dev \
+            libgl1-mesa-dev
 
       - name: Configure
-        # Added -G Ninja to speed things up since you're installing ninja-build
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        # Use Ninja on Linux, default generators on Win/Mac to avoid "Generator not found" errors
+        run: |
+          if [ "${{ runner.os }}" == "Linux" ]; then
+            cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          else
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          fi
+        shell: bash
 
       - name: Build
         run: cmake --build build --config Release --parallel 2
