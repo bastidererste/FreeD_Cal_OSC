@@ -25,6 +25,7 @@ jobs:
             pkg-config \
             libasound2-dev \
             libjack-jackd2-dev \
+            ladspa-sdk \
             libx11-dev \
             libxcomposite-dev \
             libxcursor-dev \
