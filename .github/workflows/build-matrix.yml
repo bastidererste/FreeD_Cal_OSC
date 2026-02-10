@@ -1,6 +1,5 @@
 name: Build Matrix
-
-on:
+on: 
   push:
   pull_request:
 
@@ -34,10 +33,16 @@ jobs:
             libxrandr-dev \
             libxrender-dev \
             libglu1-mesa-dev \
-            mesa-common-dev
+            mesa-common-dev \
+            libfreetype6-dev \
+            libfontconfig1-dev \
+            libcurl4-openssl-dev \
+            libwebkit2gtk-4.0-dev \
+            libgtk-3-dev
 
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        # Added -G Ninja to speed things up since you're installing ninja-build
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
         run: cmake --build build --config Release --parallel 2
