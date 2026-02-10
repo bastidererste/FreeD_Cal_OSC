@@ -45,11 +45,10 @@ jobs:
         shell: bash
         run: |
           if [ "${{ runner.os }}" == "Linux" ]; then
-            # We add JUCE_USE_CURL=ON and JUCE_WEBVIEW=OFF as a fallback
-            # if you don't actually need the browser component.
             cmake -S . -B build -G Ninja \
               -DCMAKE_BUILD_TYPE=Release \
-              -DJUCE_BUILD_EXTRAS=ON
+              -DJUCE_BUILD_EXTRAS=ON \
+              -DJUCE_WEB_BROWSER_LINUX_API=4.1
           else
             cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
           fi
